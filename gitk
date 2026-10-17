@@ -2925,6 +2925,7 @@ proc makewindow {} {
         {xx "" separator}
         {mc "Fixup marked commit into this" command {foldmarked fixup}}
         {mc "Squash marked commit into this" command {foldmarked squash}}
+        {mc "Fixup local changes into this" command foldlocal}
     }
     $rowctxmenu configure -tearoff 0
 
@@ -10397,35 +10398,9 @@ proc revert {} {
 # oldest first, and returns it changed.  Afterwards select what became
 # of commit $selid.
 proc rewritehistory {ids editscript selid} {
-    set head [exec git rev-parse HEAD]
-    foreach id $ids {
-        if {[catch {safe_exec [list git merge-base --is-ancestor $id $head]}]} {
-            error_popup [mc "Commit %s is not on the current branch." \
-                             [shortids $id]]
-            return
-        }
-    }
-    # the oldest of $ids is the one with the most commits up to HEAD
-    set oldest {}
-    set most -1
-    foreach id $ids {
-        set n [exec git rev-list --count $id..$head]
-        if {$n > $most} {
-            set most $n
-            set oldest $id
-        }
-    }
-    if {[catch {set base [exec git rev-parse --verify --quiet $oldest^]}]} {
-        set base {}
-        set range $head
-    } else {
-        set range $base..$head
-    }
-    if {[exec git rev-list --merges $range] ne {}} {
-        error_popup [mc "There are merges between %s and HEAD; gitk can't\
-                         rewrite that part of the history." [shortids $oldest]]
-        return
-    }
+    set r [rewritablerange $ids]
+    if {$r eq {}} return
+    lassign $r base range
 
     set todo {}
     foreach id [split [exec git rev-list --reverse $range] "\n"] {
@@ -10511,6 +10486,42 @@ proc rewritehistory {ids editscript selid} {
     }
 }
 
+# Check that the history from the oldest of $ids up to HEAD can be
+# rewritten, and return the base for the rebase (the parent of that
+# commit, or {} for a root commit) and the range of commits to rewrite.
+proc rewritablerange {ids} {
+    set head [exec git rev-parse HEAD]
+    foreach id $ids {
+        if {[catch {safe_exec [list git merge-base --is-ancestor $id $head]}]} {
+            error_popup [mc "Commit %s is not on the current branch." \
+                             [shortids $id]]
+            return {}
+        }
+    }
+    # the oldest of $ids is the one with the most commits up to HEAD
+    set oldest {}
+    set most -1
+    foreach id $ids {
+        set n [exec git rev-list --count $id..$head]
+        if {$n > $most} {
+            set most $n
+            set oldest $id
+        }
+    }
+    if {[catch {set base [exec git rev-parse --verify --quiet $oldest^]}]} {
+        set base {}
+        set range $head
+    } else {
+        set range $base..$head
+    }
+    if {[exec git rev-list --merges $range] ne {}} {
+        error_popup [mc "There are merges between %s and HEAD; gitk can't\
+                         rewrite that part of the history." [shortids $oldest]]
+        return {}
+    }
+    return [list $base $range]
+}
+
 # Fold the marked commit into the one the menu is for, as with
 # "git rebase -i": $how is fixup (keep this commit's message) or squash
 # (combine both messages).
@@ -10520,6 +10531,34 @@ proc foldmarked {how} {
     set into $rowmenuid
     set from $markedid
     rewritehistory [list $into $from] [list foldtodo $how $from $into] $into
+}
+
+# Fold the staged changes (or if nothing is staged, all changes to
+# tracked files) into the commit the menu is for.
+proc foldlocal {} {
+    global rowmenuid commitinfo
+
+    set into $rowmenuid
+    if {[rewritablerange [list $into]] eq {}} return
+    set cmd [list git commit --quiet --fixup=$into]
+    if {![catch {safe_exec [list git diff --cached --quiet]}]} {
+        # nothing staged
+        if {![catch {safe_exec [list git diff --quiet]}]} {
+            error_popup [mc "There are no local changes to fold in."]
+            return
+        }
+        if {![confirm_popup [mc "Nothing is staged.  Fold all local changes\
+                to tracked files into \"%s\"?" [lindex $commitinfo($into) 0]]]} {
+            return
+        }
+        lappend cmd --all
+    }
+    if {[catch {safe_exec_redirect $cmd [list 2>@1]} err]} {
+        error_popup $err
+        return
+    }
+    set fixup [exec git rev-parse HEAD]
+    rewritehistory [list $into $fixup] [list foldtodo fixup $fixup $into] $into
 }
 
 proc foldtodo {how from into todo} {
