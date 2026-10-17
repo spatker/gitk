@@ -10610,6 +10610,7 @@ proc rewritehistory {ids editscript selid} {
     set env_saved [array get ::env GIT_*EDITOR]
     set ::env(GIT_SEQUENCE_EDITOR) "cp '$todofile'"
     set ::env(GIT_EDITOR) true
+    set stash [stashtop]
     nowbusy rebase [mc "Rebasing"]
     update
     set failed [catch {safe_exec_redirect $cmd [list 2>@1]} err]
@@ -10619,22 +10620,14 @@ proc rewritehistory {ids editscript selid} {
     file delete -force $dir
 
     if {$failed} {
-        # keep what went wrong, drop progress and advice
-        set lines {}
-        foreach l [split $err "\r\n"] {
-            if {$l ne {} && ![string match "Rebasing (*" $l] &&
-                ![string match "hint: *" $l] &&
-                $l ne "child process exited abnormally"} {
-                lappend lines $l
-            }
-        }
-        set err [join $lines "\n"]
+        set err [cleangitoutput $err]
         if {[file exists [exec git rev-parse --git-path rebase-merge]]} {
             if {[confirm_popup [mc "The rebase stopped:\n\n%s\n\n\"Abort rebase\"\
                     puts the branch back as it was.  Or resolve the conflicts\
                     yourself and run \"git rebase --continue\"." $err] . \
                     [mc "Abort rebase"] [mc "Resolve it myself"]]} {
-                catch {safe_exec_redirect [list git rebase --abort] [list 2>@1]}
+                catch {safe_exec_redirect [list git rebase --abort] [list 2>@1]} err
+                checkautostash $stash $err
             }
         } else {
             error_popup $err
@@ -10642,6 +10635,7 @@ proc rewritehistory {ids editscript selid} {
         reloadcommits
         return
     }
+    checkautostash $stash $err
 
     set newsel {}
     if {$pos >= 0} {
@@ -10655,6 +10649,39 @@ proc rewritehistory {ids editscript selid} {
     if {$newsel ne {}} {
         reset_pending_select $newsel
     }
+}
+
+proc stashtop {} {
+    if {[catch {set id [exec git rev-parse --quiet --verify refs/stash]}]} {
+        return {}
+    }
+    return $id
+}
+
+# Git's output, without progress, advice and Tcl's note about the exit
+# status.
+proc cleangitoutput {out} {
+    set lines {}
+    foreach l [split $out "\r\n"] {
+        if {$l ne {} && ![string match "Rebasing (*" $l] &&
+            ![string match "hint: *" $l] &&
+            $l ne "child process exited abnormally"} {
+            lappend lines $l
+        }
+    }
+    return [join $lines "\n"]
+}
+
+# The rebase runs with --autostash.  If the uncommitted changes then
+# couldn't be applied again cleanly, git keeps them in the stash; say
+# so, rather than have them seem lost or the rebase seem fine.  $stash is the top of the stash
+# before the rebase, $out what git said.
+proc checkautostash {stash out} {
+    if {[stashtop] eq $stash} return
+    error_popup [mc "Your uncommitted changes conflict with the rewritten\
+            history, so git could not simply put them back.  They are kept\
+            in the stash (see \"git stash list\"); what git says below\
+            tells how to go on.\n\nGit said:\n%s" [cleangitoutput $out]]
 }
 
 # Check that the history from the oldest of $ids up to HEAD can be
