@@ -7525,6 +7525,10 @@ proc dispnexttag {} {
     global selectedline currentid showneartags tagphase ctext
 
     if {$selectedline eq {} || !$showneartags} return
+    if {[gitneartags]} {
+        startgitneartags $currentid
+        return
+    }
     switch -- $tagphase {
         0 {
             set dtags [desctags $currentid]
@@ -7554,6 +7558,115 @@ proc dispnexttag {} {
     if {[incr tagphase] <= 2} {
         after idle dispnexttag
     }
+}
+
+# With a commit-graph, git can tell us the nearby tags and the branches
+# containing a commit quickly, even in a huge repository.  Then ask git
+# for the selected commit only, instead of reading the whole history
+# with getallcommits, which takes a lot of time and memory.
+proc gitneartags {} {
+    global usegitneartags
+
+    if {![info exists usegitneartags]} {
+        set usegitneartags 0
+        catch {
+            foreach f [split [safe_exec [list git rev-parse \
+                    --git-path objects/info/commit-graph \
+                    --git-path objects/info/commit-graphs/commit-graph-chain]] "\n"] {
+                if {[file exists $f]} {
+                    set usegitneartags 1
+                }
+            }
+        }
+    }
+    return $usegitneartags
+}
+
+proc startgitneartags {id} {
+    global neartagfds neartagout idtags
+
+    if {[info exists neartagfds]} {
+        foreach fd $neartagfds {
+            catch {close $fd}
+            nukefile $fd
+        }
+    }
+    set neartagfds {}
+    unset -nocomplain neartagout
+    # the commit's own tags are shown already, we want the nearest others
+    set exclude {}
+    if {[info exists idtags($id)]} {
+        foreach t $idtags($id) {
+            lappend exclude --exclude=$t
+        }
+    }
+    foreach {what cmd} [list \
+            branch [list git for-each-ref --format=%(objectname) --contains $id \
+                        refs/heads refs/remotes] \
+            follows [concat git describe --tags --abbrev=0 $exclude $id] \
+            precedes [concat git describe --tags --contains $exclude $id]] {
+        if {[catch {set fd [safe_open_command $cmd]}]} continue
+        fconfigure $fd -blocking 0
+        lappend neartagfds $fd
+        set neartagout($fd) {}
+        filerun $fd [list readgitneartags $fd $id $what]
+    }
+}
+
+proc readgitneartags {fd id what} {
+    global currentid neartagfds neartagout ctext tagids idheads
+
+    append neartagout($fd) [read $fd]
+    if {![eof $fd]} {
+        return 1
+    }
+    set out $neartagout($fd)
+    unset neartagout($fd)
+    catch {close $fd}
+    set i [lsearch -exact $neartagfds $fd]
+    set neartagfds [lreplace $neartagfds $i $i]
+    if {![info exists currentid] || $currentid ne $id} {
+        return 0
+    }
+    set ids {}
+    if {$what eq "branch"} {
+        foreach h [split $out "\n"] {
+            if {[info exists idheads($h)] && [lsearch -exact $ids $h] < 0} {
+                lappend ids $h
+            }
+        }
+        if {[appendrefs branch $ids idheads] > 1
+            && [$ctext get "branch -3c"] eq "h"} {
+            # turn "Branch" into "Branches"
+            $ctext conf -state normal
+            $ctext insert "branch -2c" "es"
+            $ctext conf -state disabled
+        }
+    } else {
+        # "git describe --contains" says e.g. v6.18-rc1~74^2~7
+        regsub {[~^].*} [string trim $out] {} tag
+        if {[info exists tagids($tag)]} {
+            appendrefs $what [list $tagids($tag)] idtags
+        }
+    }
+    return 0
+}
+
+# Heads containing commit $id, asking git synchronously.
+proc gitdescheads {id} {
+    global idheads
+
+    set ret {}
+    catch {
+        foreach h [split [safe_exec [list git for-each-ref \
+                --format=%(objectname) --contains $id \
+                refs/heads refs/remotes]] "\n"] {
+            if {[info exists idheads($h)] && [lsearch -exact $ret $h] < 0} {
+                lappend ret $h
+            }
+        }
+    }
+    return $ret
 }
 
 proc make_secsel {id} {
@@ -10525,6 +10638,8 @@ proc getallcommits {} {
     global idheads idtags idotherrefs allparents tagobjid
     global gitdir
 
+    if {[gitneartags]} return
+
     if {![info exists allcommits]} {
         set nextarc 0
         set allcommits 0
@@ -11509,6 +11624,10 @@ proc anctags {id} {
 proc descheads {id} {
     global arcnos arcstart arcids archeads idheads cached_dheads
     global allparents arcout
+
+    if {[gitneartags]} {
+        return [gitdescheads $id]
+    }
 
     if {![info exists allparents($id)]} {
         return {}
