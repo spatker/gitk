@@ -2886,7 +2886,9 @@ proc makewindow {} {
     bind $cflist <ButtonRelease-1> {treeclick %W %x %y}
     global ctxbut
     bind $cflist $ctxbut {pop_flist_menu %W %X %Y %x %y}
+    bind $cflist <Double-1> {flist_open_editor %W %x %y; break}
     bind $ctext $ctxbut {pop_diff_menu %W %X %Y %x %y}
+    bind $ctext <$M1B-Button-1> {diff_open_editor %W %x %y; break}
     bind $ctext <Button-1> {focus %W}
     bind $ctext <<Selection>> rehighlight_search_results
     for {set i 1} {$i < 10} {incr i} {
@@ -2943,6 +2945,7 @@ proc makewindow {} {
         {mc "Highlight this too" command {flist_hl 0}}
         {mc "Highlight this only" command {flist_hl 1}}
         {mc "External diff" command {external_diff}}
+        {mc "Open in editor" command {open_in_editor $flist_menu_file}}
         {mc "Blame parent commit" command {external_blame 1}}
         {mc "Copy path" command {clipboard clear; clipboard append $flist_menu_file}}
     }
@@ -2953,6 +2956,8 @@ proc makewindow {} {
     makemenu $diff_menu {
         {mc "Show origin of this line" command show_line_source}
         {mc "Run git gui blame on this line" command {external_blame_diff}}
+        {mc "Open in editor at this line" command {open_in_editor $flist_menu_file \
+            [diff_new_lineno $diff_menu_filebase $diff_menu_line]}}
     }
     $diff_menu configure -tearoff 0
 }
@@ -3707,11 +3712,10 @@ proc sel_flist {w x y} {
     suppress_highlighting_file_for_current_scrollpos
 }
 
-proc pop_flist_menu {w X Y x y} {
-    global ctext cflist cmitmode flist_menu flist_menu_file
-    global treediffs diffids
+# The file shown at position $x,$y of the file list, or {}
+proc flist_file_at {w x y} {
+    global cmitmode treediffs diffids
 
-    stopfinding
     set l [lindex [split [$w index "@$x,$y"] "."] 0]
     if {$l <= 1} return
     if {$cmitmode eq "tree"} {
@@ -3720,6 +3724,30 @@ proc pop_flist_menu {w X Y x y} {
     } else {
         set e [lindex $treediffs($diffids) [expr {$l-2}]]
     }
+    return $e
+}
+
+proc flist_open_editor {w x y} {
+    set e [flist_file_at $w $x $y]
+    if {$e ne {}} {
+        open_in_editor $e
+    }
+}
+
+proc diff_open_editor {w x y} {
+    set line [lindex [split [$w index "@$x,$y"] "."] 0]
+    set f [find_ctext_fileinfo $line]
+    if {$f ne {}} {
+        open_in_editor [lindex $f 0] [diff_new_lineno [lindex $f 1] $line]
+    }
+}
+
+proc pop_flist_menu {w X Y x y} {
+    global ctext cflist cmitmode flist_menu flist_menu_file
+
+    stopfinding
+    set e [flist_file_at $w $x $y]
+    if {$e eq {}} return
     set flist_menu_file $e
     set xdiffstate "normal"
     if {$cmitmode eq "tree"} {
@@ -3864,6 +3892,69 @@ proc check_for_renames_in_diff {filepath} { # renames
     }
 
     return $renames
+}
+
+# Line number in the new version of the file for line $line of the
+# diff display, in the file section starting at line $base.
+proc diff_new_lineno {base line} {
+    global ctext cmitmode
+
+    if {$cmitmode eq "tree"} {
+        return [expr {$line - $base}]
+    }
+    set s_lix [$ctext search -backwards -regexp ^@@ "$line.0 lineend" $base.0]
+    if {$s_lix eq {}} {
+        return 1
+    }
+    set s_line [$ctext get $s_lix "$s_lix lineend"]
+    if {![regexp {^@(@+)(?: -\d+(?:,\d+)?)+ \+(\d+)} $s_line -> ats lno]} {
+        return 1
+    }
+    # one column of +/- per parent; lines with a - aren't in the new file
+    set np [string length $ats]
+    set s_lno [lindex [split $s_lix "."] 0]
+    for {set i [expr {$s_lno + 1}]} {$i < $line} {incr i} {
+        if {[string first "-" [$ctext get $i.0 $i.$np]] < 0} {
+            incr lno
+        }
+    }
+    return $lno
+}
+
+# Open the working tree copy of $file (relative to the top of the
+# working tree) with the editor from the preferences.  In the editor
+# command, %f is replaced by the file name and %l by the line number;
+# without %f, the file name is appended.
+proc open_in_editor {file {line 1}} {
+    global editor worktree
+
+    if {$editor eq {}} {
+        error_popup [mc "No editor is set in the preferences."]
+        return
+    }
+    set path [file normalize [file join $worktree $file]]
+    if {![file exists $path]} {
+        error_popup [mc "File %s does not exist in the working tree." $file]
+        return
+    }
+    if {[catch {set words [shellsplit $editor]} err]} {
+        error_popup "[mc "Error starting editor:"] $err"
+        return
+    }
+    set cmd {}
+    set hasfile 0
+    foreach w $words {
+        if {[string first "%f" $w] >= 0} {
+            set hasfile 1
+        }
+        lappend cmd [string map [list %f $path %l $line] $w]
+    }
+    if {!$hasfile} {
+        lappend cmd $path
+    }
+    if {[catch {safe_exec_redirect $cmd [list &]} err]} {
+        error_popup "[mc "Error starting editor:"] $err"
+    }
 }
 
 proc external_diff {} {
@@ -12042,6 +12133,11 @@ proc prefspage_general {notebook} {
     grid x $page.webbrowserl $page.webbrowser -sticky ew
     grid configure $page.webbrowser -padx {0 5}
 
+    ttk::entry $page.editor -textvariable editor
+    ttk::label $page.editorl -text [mc "Editor (%f file, %l line)"]
+    grid x $page.editorl $page.editor -sticky ew
+    grid configure $page.editor -padx {0 5}
+
     grid columnconfigure $page 2 -weight 1
 
     return $page
@@ -12915,14 +13011,17 @@ if {[tk windowingsystem] eq "win32"} {
     set fgcolor SystemWindowText
     set selectbgcolor SystemHighlight
     set web_browser "cmd /c start"
+    set editor "notepad"
 } else {
     set bgcolor white
     set fgcolor black
     set selectbgcolor gray85
     if {[tk windowingsystem] eq "aqua"} {
         set web_browser "open"
+        set editor "open -t"
     } else {
         set web_browser "xdg-open"
+        set editor "xdg-open"
     }
 }
 set diffcolors {"#c30000" "#009800" blue}
@@ -13007,6 +13106,7 @@ set config_variables {
     diffbgcolors
     diffcolors
     diffcontext
+    editor
     extdifftool
     fgcolor
     filesepbgcolor
