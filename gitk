@@ -2922,6 +2922,9 @@ proc makewindow {} {
         {mc "Diff this -> marked commit" command {diffvsmark 0}}
         {mc "Diff marked commit -> this" command {diffvsmark 1}}
         {mc "Revert this commit" command revert}
+        {xx "" separator}
+        {mc "Fixup marked commit into this" command {foldmarked fixup}}
+        {mc "Squash marked commit into this" command {foldmarked squash}}
     }
     $rowctxmenu configure -tearoff 0
 
@@ -9560,6 +9563,10 @@ proc rowmenu {x y id} {
     $menu entryconfigure [mca "Make patch"] -state $state
     $menu entryconfigure [mca "Diff this -> marked commit"] -state $mstate
     $menu entryconfigure [mca "Diff marked commit -> this"] -state $mstate
+    if {$menu eq $rowctxmenu} {
+        $menu entryconfigure [mca "Fixup marked commit into this"] -state $mstate
+        $menu entryconfigure [mca "Squash marked commit into this"] -state $mstate
+    }
     tk_popup $menu $x $y
 }
 
@@ -10381,6 +10388,146 @@ proc revert {} {
     }
 
     notbusy revert
+}
+
+# Rewrite the history of the current branch with an interactive rebase.
+# $ids are the commits whose place in history changes; the rebase
+# starts from the parent of the oldest of them.  $editscript gets the
+# list of {command id} pairs for the commits from there up to HEAD,
+# oldest first, and returns it changed.  Afterwards select what became
+# of commit $selid.
+proc rewritehistory {ids editscript selid} {
+    set head [exec git rev-parse HEAD]
+    foreach id $ids {
+        if {[catch {safe_exec [list git merge-base --is-ancestor $id $head]}]} {
+            error_popup [mc "Commit %s is not on the current branch." \
+                             [shortids $id]]
+            return
+        }
+    }
+    # the oldest of $ids is the one with the most commits up to HEAD
+    set oldest {}
+    set most -1
+    foreach id $ids {
+        set n [exec git rev-list --count $id..$head]
+        if {$n > $most} {
+            set most $n
+            set oldest $id
+        }
+    }
+    if {[catch {set base [exec git rev-parse --verify --quiet $oldest^]}]} {
+        set base {}
+        set range $head
+    } else {
+        set range $base..$head
+    }
+    if {[exec git rev-list --merges $range] ne {}} {
+        error_popup [mc "There are merges between %s and HEAD; gitk can't\
+                         rewrite that part of the history." [shortids $oldest]]
+        return
+    }
+
+    set todo {}
+    foreach id [split [exec git rev-list --reverse $range] "\n"] {
+        lappend todo [list pick $id]
+    }
+    set todo [{*}$editscript $todo]
+
+    # where $selid ends up: the commits that are picked become new
+    # commits, those folded into them don't
+    set pos -1
+    set npicks 0
+    foreach t $todo {
+        if {[lindex $t 0] eq "pick"} {
+            incr npicks
+        }
+        if {[lindex $t 1] eq $selid} {
+            set pos [expr {$npicks - 1}]
+        }
+    }
+
+    set dir [gitknewtmpdir]
+    if {$dir eq {}} return
+    set todofile [file join $dir git-rebase-todo]
+    set f [safe_open_file $todofile w]
+    foreach t $todo {
+        puts $f [join $t " "]
+    }
+    close $f
+
+    if {$base eq {}} {
+        set cmd [list git rebase -i --autostash --root]
+    } else {
+        set cmd [list git rebase -i --autostash $base]
+    }
+    # git runs these with the shell: replace git's todo list with ours,
+    # and take the combined message of squashed commits as it is
+    set env_saved [array get ::env GIT_*EDITOR]
+    set ::env(GIT_SEQUENCE_EDITOR) "cp '$todofile'"
+    set ::env(GIT_EDITOR) true
+    nowbusy rebase [mc "Rebasing"]
+    update
+    set failed [catch {safe_exec_redirect $cmd [list 2>@1]} err]
+    unset -nocomplain ::env(GIT_SEQUENCE_EDITOR) ::env(GIT_EDITOR)
+    array set ::env $env_saved
+    notbusy rebase
+    file delete -force $dir
+
+    if {$failed} {
+        # keep what went wrong, drop progress and advice
+        set lines {}
+        foreach l [split $err "\r\n"] {
+            if {$l ne {} && ![string match "Rebasing (*" $l] &&
+                ![string match "hint: *" $l] &&
+                $l ne "child process exited abnormally"} {
+                lappend lines $l
+            }
+        }
+        set err [join $lines "\n"]
+        if {[file exists [exec git rev-parse --git-path rebase-merge]]} {
+            if {[confirm_popup [mc "The rebase stopped:\n\n%s\n\nAbort it and\
+                    put the branch back as it was?  Otherwise, resolve the\
+                    conflicts and run \"git rebase --continue\" yourself." $err]]} {
+                catch {safe_exec_redirect [list git rebase --abort] [list 2>@1]}
+            }
+        } else {
+            error_popup $err
+        }
+        reloadcommits
+        return
+    }
+
+    set newsel {}
+    if {$pos >= 0} {
+        set newids [split [exec git rev-list --reverse \
+                               [expr {$base eq {} ? "HEAD" : "$base..HEAD"}]] "\n"]
+        if {[llength $newids] == $npicks} {
+            set newsel [lindex $newids $pos]
+        }
+    }
+    reloadcommits
+    if {$newsel ne {}} {
+        reset_pending_select $newsel
+    }
+}
+
+# Fold the marked commit into the one the menu is for, as with
+# "git rebase -i": $how is fixup (keep this commit's message) or squash
+# (combine both messages).
+proc foldmarked {how} {
+    global rowmenuid markedid
+
+    set into $rowmenuid
+    set from $markedid
+    rewritehistory [list $into $from] [list foldtodo $how $from $into] $into
+}
+
+proc foldtodo {how from into todo} {
+    set i [lsearch -exact -index 1 $todo $from]
+    set t [lindex $todo $i]
+    set todo [lreplace $todo $i $i]
+    set i [lsearch -exact -index 1 $todo $into]
+    return [linsert $todo [expr {$i + 1}] [list $how [lindex $t 1]]]
 }
 
 proc resethead {} {
