@@ -9970,34 +9970,23 @@ proc mkpatchcan {} {
     unset patchtop
 }
 
-# Write the commits from the selected one to the one the menu is for
-# (or just that one) as patch files with "git format-patch".
+# Write commits as patch files with "git format-patch -<n>": the one
+# the menu is for and the ones before it.  If another commit is
+# selected on the same line of history, start with the range between
+# the two.
 proc formatpatches {} {
-    global rowmenuid currentid commitinfo fptop fpdir fpstart
+    global rowmenuid currentid fptop fpdir fpstart fpcount fpnewest
     global formatpatchopts formatpatchsrcuri
 
-    set ids [list $rowmenuid]
+    set fpnewest $rowmenuid
+    set fpcount 1
     if {[info exists currentid] && $currentid ne $rowmenuid} {
         if {![catch {safe_exec [list git merge-base --is-ancestor $currentid $rowmenuid]}]} {
-            set ids [list $currentid $rowmenuid]
+            set fpcount [expr {[exec git rev-list --count --no-merges $currentid..$rowmenuid] + 1}]
         } elseif {![catch {safe_exec [list git merge-base --is-ancestor $rowmenuid $currentid]}]} {
-            set ids [list $rowmenuid $currentid]
-        } else {
-            error_popup [mc "The selected commit and this one aren't on the\
-                             same line of history."]
-            return
+            set fpnewest $currentid
+            set fpcount [expr {[exec git rev-list --count --no-merges $rowmenuid..$currentid] + 1}]
         }
-    }
-    lassign $ids oldest newest
-    if {$newest eq {}} {
-        set newest $oldest
-    }
-    if {[catch {set base [exec git rev-parse --verify --quiet $oldest^]}]} {
-        set range [list --root $newest]
-        set n [exec git rev-list --count $newest]
-    } else {
-        set range [list $base..$newest]
-        set n [exec git rev-list --count $base..$newest]
     }
 
     set top .formatpatches
@@ -10007,10 +9996,18 @@ proc formatpatches {} {
     make_transient $top .
     ttk::label $top.title -text [mc "Format patches"]
     grid $top.title - - -pady 10
-    ttk::label $top.what -justify left -text \
-        [mc "%d commits, from:\n  %s\nto:\n  %s" $n \
-             [lindex $commitinfo($oldest) 0] [lindex $commitinfo($newest) 0]]
+    ttk::label $top.countl -text [mc "Number of commits:"]
+    ttk::spinbox $top.count -from 1 -to 100000 -width 6 -textvariable fpcount
+    grid $top.countl $top.count -sticky w -padx 5 -pady 2
+    ttk::label $top.what -justify left
     grid $top.what - - -sticky w -padx 5
+    trace add variable fpcount write formatpatchesrange
+    bind $top <Destroy> {
+        if {"%W" eq $fptop} {
+            trace remove variable fpcount write formatpatchesrange
+        }
+    }
+    formatpatchesrange
     ttk::label $top.dirl -text [mc "Output directory:"]
     if {![info exists fpdir]} {
         set fpdir [pwd]
@@ -10034,26 +10031,50 @@ proc formatpatches {} {
         [mc "Copy the patches as \"file://...\" lines for a recipe"]
     grid $top.srcuri - - -sticky w -padx 5 -pady 2
     ttk::frame $top.buts
-    ttk::button $top.buts.gen -text [mc "Write"] -command [list formatpatchesgo $range]
+    ttk::button $top.buts.gen -text [mc "Write"] -command formatpatchesgo
     ttk::button $top.buts.can -text [mc "Cancel"] -command {destroy $fptop}
-    bind $top <Key-Return> [list formatpatchesgo $range]
+    bind $top <Key-Return> formatpatchesgo
     bind $top <Key-Escape> {destroy $fptop}
     grid $top.buts.gen $top.buts.can
     grid columnconfigure $top.buts 0 -weight 1 -uniform a
     grid columnconfigure $top.buts 1 -weight 1 -uniform a
     grid $top.buts - - -pady 10 -sticky ew
-    focus $top.dir
+    focus $top.count
 }
 
-proc formatpatchesgo {range} {
-    global fptop fpdir fpstart formatpatchopts formatpatchsrcuri
+# Show which commits the format-patch dialog will write.
+proc formatpatchesrange {args} {
+    global fptop fpcount fpnewest
 
+    if {![string is integer -strict $fpcount] || $fpcount < 1} {
+        $fptop.what conf -text [mc "(not a number)"]
+        return
+    }
+    set ids [split [exec git rev-list --no-merges -n $fpcount $fpnewest] "\n"]
+    set first [exec git log -1 --format=%s [lindex $ids end]]
+    set last [exec git log -1 --format=%s [lindex $ids 0]]
+    if {[llength $ids] == 1} {
+        set text [mc "1 commit:\n  %s" $last]
+    } else {
+        set text [mc "%d commits, from:\n  %s\nto:\n  %s" [llength $ids] $first $last]
+    }
+    $fptop.what conf -text $text
+}
+
+proc formatpatchesgo {} {
+    global fptop fpdir fpstart fpcount fpnewest
+    global formatpatchopts formatpatchsrcuri
+
+    if {![string is integer -strict $fpcount] || $fpcount < 1} {
+        error_popup [mc "The number of commits must be a number."] $fptop
+        return
+    }
     if {[catch {set opts [shellsplit $formatpatchopts]} err]} {
         error_popup $err $fptop
         return
     }
     set cmd [concat [list git format-patch -o $fpdir --start-number $fpstart] \
-                 $opts $range]
+                 $opts [list -$fpcount $fpnewest]]
     if {[catch {set files [safe_exec $cmd]} err]} {
         error_popup "[mc "Error writing patches:"] $err" $fptop
         return
