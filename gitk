@@ -2948,6 +2948,7 @@ proc makewindow {} {
         {mc "Open in editor" command {open_in_editor $flist_menu_file}}
         {mc "Blame parent commit" command {external_blame 1}}
         {mc "Copy path" command {clipboard clear; clipboard append $flist_menu_file}}
+        {mc "Copy full path" command {copy_full_path $flist_menu_file}}
     }
     $flist_menu configure -tearoff 0
 
@@ -2958,6 +2959,8 @@ proc makewindow {} {
         {mc "Run git gui blame on this line" command {external_blame_diff}}
         {mc "Open in editor at this line" command {open_in_editor $flist_menu_file \
             [diff_new_lineno $diff_menu_filebase $diff_menu_line]}}
+        {mc "Copy path" command {clipboard clear; clipboard append $flist_menu_file}}
+        {mc "Copy full path" command {copy_full_path $flist_menu_file}}
     }
     $diff_menu configure -tearoff 0
 }
@@ -3919,6 +3922,13 @@ proc diff_new_lineno {base line} {
         }
     }
     return $lno
+}
+
+proc copy_full_path {file} {
+    global worktree
+
+    clipboard clear
+    clipboard append [file normalize [file join $worktree $file]]
 }
 
 # Open the working tree copy of $file (relative to the top of the
