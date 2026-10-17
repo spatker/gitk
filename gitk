@@ -2759,6 +2759,19 @@ proc makewindow {} {
         -command reselectline -variable cmitmode -value "tree"
     grid .bright.mode.patch .bright.mode.tree -sticky ew
     pack .bright.mode -side top -fill x
+    # the things one often does with a file, without a context menu
+    ttk::frame .bright.tools
+    ttk::button .bright.tools.diff -text [mc "Diff tool"] \
+        -command {curfile_do external_diff}
+    ttk::button .bright.tools.edit -text [mc "Editor"] \
+        -command {curfile_do open_in_editor}
+    ttk::button .bright.tools.copy -text [mc "Copy path"] \
+        -command {curfile_do {apply {f {clipboard clear; clipboard append $f}}}}
+    ttk::button .bright.tools.copyfull -text [mc "Copy full path"] \
+        -command {curfile_do copy_full_path}
+    pack .bright.tools.diff .bright.tools.edit .bright.tools.copy \
+        .bright.tools.copyfull -side left -padx 1
+    pack .bright.tools -side top -fill x
     set cflist .bright.cfiles
     set indent [font measure mainfont "nn"]
     text $cflist \
@@ -3740,6 +3753,41 @@ proc flist_file_at {w x y} {
         set e [lindex $treediffs($diffids) [expr {$l-2}]]
     }
     return $e
+}
+
+# The file highlighted in the file list, which follows the diff as it
+# scrolls; the first file while the commit message is shown.
+proc currentfile {} {
+    global cflist_top cmitmode treediffs diffids
+
+    if {![info exists cflist_top]} return
+    set l [expr {max($cflist_top, 2)}]
+    if {$cmitmode eq "tree"} {
+        if {[catch {set e [linetoelt $l]}] || [string index $e end] eq "/"} {
+            return {}
+        }
+        return $e
+    }
+    if {![info exists treediffs($diffids)]} return
+    return [lindex $treediffs($diffids) [expr {$l - 2}]]
+}
+
+# Run $cmd on the current file.  External diff gets the file through
+# $flist_menu_file, as from the file list's context menu.
+proc curfile_do {cmd} {
+    global flist_menu_file cmitmode
+
+    set f [currentfile]
+    if {$f eq {} || ($cmd eq "external_diff" && $cmitmode eq "tree")} {
+        bell
+        return
+    }
+    set flist_menu_file $f
+    if {$cmd eq "external_diff"} {
+        external_diff
+    } else {
+        {*}$cmd $f
+    }
 }
 
 proc flist_open_editor {w x y} {
