@@ -11609,15 +11609,29 @@ proc showtags {id isnew} {
 
 proc doquit {} {
     global stopped
-    global gitktmpdir
+    global gitktmpdir isbusy statusw
 
     set stopped 100
+    stop_backends
+
+    # Don't leave the repository in a half-updated state: a reset or
+    # checkout still running in the background would be killed by
+    # SIGPIPE when we exit and close its output pipe.
+    while {[info exists isbusy(reset)] || [info exists isbusy(checkout)]} {
+        $statusw conf -text [mc "Waiting for git to finish..."]
+        vwait isbusy
+    }
+
     savestuff .
     destroy .
 
     if {[info exists gitktmpdir]} {
         catch {file delete -force $gitktmpdir}
     }
+
+    # Exit directly instead of returning to the event loop: with a large
+    # history, freeing every commit on interpreter teardown takes seconds.
+    exit
 }
 
 proc mkfontdisp {font top which} {
