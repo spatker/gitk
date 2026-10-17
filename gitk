@@ -2926,6 +2926,8 @@ proc makewindow {} {
         {mc "Fixup marked commit into this" command {foldmarked fixup}}
         {mc "Squash marked commit into this" command {foldmarked squash}}
         {mc "Fixup local changes into this" command foldlocal}
+        {mc "Move marked commit on top of this" command {movemarked 1}}
+        {mc "Move marked commit below this" command {movemarked 0}}
     }
     $rowctxmenu configure -tearoff 0
 
@@ -9567,6 +9569,8 @@ proc rowmenu {x y id} {
     if {$menu eq $rowctxmenu} {
         $menu entryconfigure [mca "Fixup marked commit into this"] -state $mstate
         $menu entryconfigure [mca "Squash marked commit into this"] -state $mstate
+        $menu entryconfigure [mca "Move marked commit on top of this"] -state $mstate
+        $menu entryconfigure [mca "Move marked commit below this"] -state $mstate
     }
     tk_popup $menu $x $y
 }
@@ -10559,6 +10563,24 @@ proc foldlocal {} {
     }
     set fixup [exec git rev-parse HEAD]
     rewritehistory [list $into $fixup] [list foldtodo fixup $fixup $into] $into
+}
+
+# Move the marked commit to just after ($after = 1) or just before
+# the commit the menu is for, in one rebase.
+proc movemarked {after} {
+    global rowmenuid markedid
+
+    set id $markedid
+    rewritehistory [list $rowmenuid $id] \
+        [list movetodo $id $rowmenuid $after] $id
+}
+
+proc movetodo {id to after todo} {
+    set i [lsearch -exact -index 1 $todo $id]
+    set t [lindex $todo $i]
+    set todo [lreplace $todo $i $i]
+    set i [lsearch -exact -index 1 $todo $to]
+    return [linsert $todo [expr {$i + $after}] $t]
 }
 
 proc foldtodo {how from into todo} {
