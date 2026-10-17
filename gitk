@@ -2728,6 +2728,11 @@ proc makewindow {} {
     $ctext tag conf m13 -fore [lindex $mergecolors 13]
     $ctext tag conf m14 -fore [lindex $mergecolors 14]
     $ctext tag conf m15 -fore [lindex $mergecolors 15]
+    # the patch's own +/- in diffs of patch files: a small block in the
+    # second column, so the line itself still shows what the commit does
+    $ctext tag conf dinner0 -back "#e05050" -fore white
+    $ctext tag conf dinner1 -back "#30a030" -fore white
+    $ctext tag conf dinnerhdr -fore "#808080"
     $ctext tag conf mmax -fore darkgrey
     set mergemax 16
     $ctext tag conf mresult -font textfontbold
@@ -8790,8 +8795,10 @@ proc parseblobdiffline {ids line} {
                 }
                 if {$dowords && $worddiff eq [mc "Markup words"]} {
                     $ctext insert end "\[-$line-\]" $tag$num
-                } else {
+                } elseif {$dowords} {
                     $ctext insert end "$line" $tag$num
+                } else {
+                    insertdiffline $line $diffnparents $tag$num
                 }
                 if {!$dowords} {
                     $ctext insert end "\n" $tag$num
@@ -8823,8 +8830,10 @@ proc parseblobdiffline {ids line} {
                 }
                 if {$dowords && $worddiff eq [mc "Markup words"]} {
                     $ctext insert end "$words_pre_markup$line$words_post_markup" $tags
-                } else {
+                } elseif {$dowords} {
                     $ctext insert end "$line" $tags
+                } else {
+                    insertdiffline $line $diffnparents $tags
                 }
                 if {!$dowords} {
                     $ctext insert end "\n" $tags
@@ -8837,6 +8846,52 @@ proc parseblobdiffline {ids line} {
             # or something else we don't recognize
             $ctext insert end "$line\n" hunksep
         }
+    }
+}
+
+# In a diff of a patch file, lines of the patch itself start with
+# their own +/- after our prefix of $np characters.  Return the tag for
+# that inner marker, so that e.g. "+-" reads as "adds a line that
+# removes something", or dinnerhdr for the patch's own headers.
+proc innerdifftag {line np} {
+    global ctext_file_names
+
+    if {![string match -nocase {*.patch} [lindex $ctext_file_names end]] &&
+        ![string match -nocase {*.diff} [lindex $ctext_file_names end]]} {
+        return {}
+    }
+    set inner [string range $line $np end]
+    # "---" and "-- " are the separators around the diffstat and before
+    # the signature in format-patch output, not removed lines
+    if {[regexp {^(@@|diff |index |--- |\+\+\+ )} $inner] ||
+        $inner eq "---" || $inner eq "-- "} {
+        return dinnerhdr
+    }
+    switch -- [string index $inner 0] {
+        "-" {return dinner0}
+        "+" {return dinner1}
+    }
+    return {}
+}
+
+# Insert a diff line with tags $tags, marking the inner diff if
+# this is a diff of a patch file.
+proc insertdiffline {line np tags} {
+    global ctext
+
+    set itag [innerdifftag $line $np]
+    if {$itag eq {}} {
+        $ctext insert end $line $tags
+        return
+    }
+    set prefix [string range $line 0 [expr {$np - 1}]]
+    set rest [string range $line $np end]
+    if {$itag eq "dinnerhdr"} {
+        $ctext insert end $prefix $tags $rest [concat $tags $itag]
+    } else {
+        $ctext insert end $prefix $tags \
+            [string index $rest 0] [concat $tags $itag] \
+            [string range $rest 1 end] $tags
     }
 }
 
