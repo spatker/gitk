@@ -592,9 +592,12 @@ proc start_rev_list {view} {
     global viewactive viewinstances vmergeonly
     global mainheadid viewmainheadid viewmainheadid_orig
     global vcanopt vflags vrevs vorigargs
+    global loadbatch vloadlimit vpaused
 
     set startmsecs [clock clicks -milliseconds]
     set commitidx($view) 0
+    set vloadlimit($view) $loadbatch
+    unset -nocomplain vpaused($view)
     # these are set this way for the error exits
     set viewcomplete($view) 1
     set viewactive($view) 0
@@ -697,7 +700,9 @@ proc stop_backends {} {
 }
 
 proc stop_rev_list {view} {
-    global viewinstances
+    global viewinstances vpaused
+
+    unset -nocomplain vpaused($view)
 
     foreach inst $viewinstances($view) {
         stop_instance $inst
@@ -1655,6 +1660,22 @@ proc getcommitlines {fd inst view updating}  {
     global idpending ordertok
     global varccommits varcid varctok vtokmod vfilelimit vshortids
     global hashlength
+    global loadbatch vloadlimit vpaused gotopending
+
+    if {!$updating && $loadbatch > 0 &&
+        $commitidx($view) >= $vloadlimit($view) &&
+        !($view == $curview && [info exists gotopending])} {
+        # We have enough for now.  Stop reading; git log will block
+        # once the pipe is full, until loadmorecommits resumes us.
+        set vpaused($view) [list $fd $inst]
+        notbusy $view
+        if {$view == $curview} {
+            # layoutmore only updates this every so often
+            setcanvscroll
+            run chewcommits
+        }
+        return 0
+    }
 
     set stuff [read $fd 500000]
     # git log doesn't terminate the last commit with a null...
@@ -1701,6 +1722,7 @@ proc getcommitlines {fd inst view updating}  {
         }
         if {$view == $curview} {
             run chewcommits
+            wakefind
         }
         return 0
     }
@@ -1837,6 +1859,7 @@ proc getcommitlines {fd inst view updating}  {
         if {$view == $curview} {
             set numcommits $commitidx($view)
             run chewcommits
+            wakefind
         }
         if {[info exists hlview] && $view == $hlview} {
             # we never actually get here...
@@ -1851,12 +1874,24 @@ proc getcommitlines {fd inst view updating}  {
 
 proc chewcommits {} {
     global curview hlview viewcomplete
-    global pending_select
+    global pending_select vpaused
 
     layoutmore
+    if {[info exists vpaused($curview)] && [info exists pending_select]} {
+        # The commit to select hasn't been read (it may not even be
+        # in this view); don't keep the user waiting for it.
+        selectline [first_real_row] 1
+    }
     if {$viewcomplete($curview)} {
         global commitidx varctok
-        global numcommits startmsecs
+        global numcommits startmsecs gotopending
+
+        if {[info exists gotopending]} {
+            notbusy goto
+            error_popup [mc "Commit %s is not in the current view" \
+                             [shortids $gotopending]]
+            unset gotopending
+        }
 
         if {[info exists pending_select]} {
             update
@@ -1879,6 +1914,19 @@ proc chewcommits {} {
         notbusy layout
     }
     return 0
+}
+
+# Resume reading commits for a view that was paused after
+# loading $loadbatch commits.
+proc loadmorecommits {view} {
+    global vpaused vloadlimit commitidx loadbatch
+
+    if {![info exists vpaused($view)]} return
+    lassign $vpaused($view) fd inst
+    unset vpaused($view)
+    set vloadlimit($view) [expr {$commitidx($view) + $loadbatch}]
+    nowbusy $view [mc "Reading"]
+    filerun $fd [list getcommitlines $fd $inst $view 0]
 }
 
 proc do_readcommit {id} {
@@ -5434,6 +5482,15 @@ proc layoutmore {} {
         update
         selectline [rowofcommit $pending_select] 1
     }
+    global gotopending
+    if {[info exists gotopending] &&
+        [commitinview $gotopending $curview]} {
+        set id $gotopending
+        unset gotopending
+        notbusy goto
+        update
+        selectline [rowofcommit $id] 1
+    }
     drawvisible
 }
 
@@ -6591,6 +6648,9 @@ proc drawvisible {} {
 
     set row [expr {int(($y0 - 3) / $linespc) - 1}]
     set endrow [expr {int(($y1 - 3) / $linespc) + 1}]
+    if {$endrow + 5 * ($endrow - $row) >= $numcommits} {
+        loadmorecommits $curview
+    }
     if {$endrow >= $vrowmod($curview)} {
         update_arcrows $curview
     }
@@ -6988,8 +7048,9 @@ proc dofind {{dirn 1} {wrap 1}} {
 }
 
 proc stopfinding {} {
-    global find_dirn findcurline fprogcoord
+    global find_dirn findcurline fprogcoord findwaiting
 
+    unset -nocomplain findwaiting
     if {[info exists find_dirn]} {
         unset find_dirn
         unset findcurline
@@ -7000,11 +7061,22 @@ proc stopfinding {} {
     stopblaming
 }
 
+# Continue a find that was waiting for more commits to be read.
+proc wakefind {} {
+    global findwaiting
+
+    if {[info exists findwaiting]} {
+        unset findwaiting
+        run findmore
+    }
+}
+
 proc findmore {} {
     global commitdata commitinfo numcommits findpattern findloc
     global findstartline findcurline findallowwrap
     global find_dirn gdttype fhighlights fprogcoord
     global curview varcorder vrownum varccommits vrowmod
+    global viewcomplete findwaiting
 
     if {![info exists find_dirn]} {
         return 0
@@ -7015,6 +7087,12 @@ proc findmore {} {
     if {$find_dirn > 0} {
         incr l
         if {$l >= $numcommits} {
+            if {!$viewcomplete($curview)} {
+                # wakefind will run us again once more commits arrive
+                set findwaiting 1
+                loadmorecommits $curview
+                return 0
+            }
             set l 0
         }
         if {$l <= $findstartline} {
@@ -7251,7 +7329,7 @@ proc appendwithlinks {text tags} {
 }
 
 proc setlink {id lk} {
-    global curview ctext pendinglinks
+    global curview ctext pendinglinks viewcomplete
     global linkfgcolor
     global hashlength
 
@@ -7271,8 +7349,17 @@ proc setlink {id lk} {
         set known [commitinview $id $curview]
     }
     if {$known} {
+        set cmd [list selbyid $id]
+    } elseif {!$viewcomplete($curview) && ![catch {
+        safe_exec [list git rev-parse --verify --quiet "$id^{commit}"]
+    }]} {
+        # not read yet, but it exists; gotoid will read up to it
+        set known 1
+        set cmd [list gotoid $id]
+    }
+    if {$known} {
         $ctext tag conf $lk -foreground $linkfgcolor -underline 1
-        $ctext tag bind $lk <1> [list selbyid $id]
+        $ctext tag bind $lk <1> $cmd
         $ctext tag bind $lk <Enter> {linkcursor %W 1}
         $ctext tag bind $lk <Leave> {linkcursor %W -1}
     } else {
@@ -8924,6 +9011,29 @@ proc sha1change {n1 n2 op} {
     }
 }
 
+# Select commit $id.  If it hasn't been read yet, keep reading the
+# current view until it shows up.  Returns 0 if $id isn't a commit or
+# the view has been read completely without finding it.
+proc gotoid {id} {
+    global curview viewcomplete gotopending
+
+    if {![commitinview $id $curview]} {
+        if {$viewcomplete($curview) || [catch {
+            set id [safe_exec [list git rev-parse --verify --quiet "$id^{commit}"]]
+        }]} {
+            return 0
+        }
+    }
+    if {[commitinview $id $curview]} {
+        selectline [rowofcommit $id] 1
+        return 1
+    }
+    set gotopending $id
+    nowbusy goto [mc "Looking for commit %s..." [shortids $id]]
+    loadmorecommits $curview
+    return 1
+}
+
 proc gotocommit {} {
     global sha1string tagids headids curview varcid
     global hashlength
@@ -8952,11 +9062,10 @@ proc gotocommit {} {
             }
         }
     }
-    if {[commitinview $id $curview]} {
-        selectline [rowofcommit $id] 1
-        return
-    }
-    if {[regexp {^[0-9a-fA-F]{4,}$} $sha1string]} {
+    if {[gotoid $id]} return
+    if {[regexp {^[0-9a-fA-F]{4,}$} $sha1string] && [catch {
+        safe_exec [list git rev-parse --verify --quiet "$id^{commit}"]
+    }]} {
         set msg [mc "Commit ID %s is not known" $sha1string]
     } else {
         set msg [mc "Revision %s is not in the current view" $sha1string]
@@ -11787,6 +11896,11 @@ proc prefspage_general {notebook} {
     ttk::spinbox $page.maxrefs -from 1 -to 1000 -width 4 -textvariable maxrefs
     grid x $page.maxrefsl $page.maxrefs -sticky w
 
+    ttk::label $page.loadbatchl -text [mc "Commits to read at a time (0 = all)"]
+    ttk::spinbox $page.loadbatch -from 0 -to 100000000 -increment 10000 \
+        -width 9 -textvariable loadbatch
+    grid x $page.loadbatchl $page.loadbatch -sticky w
+
     ttk::checkbutton $page.ldiff -text [mc "Limit diffs to listed paths"] \
         -variable limitdiffs
     grid x $page.ldiff -sticky w
@@ -12658,6 +12772,7 @@ set hideremotes 0
 set refstohide ""
 set sortrefsbytype 1
 set maxrefs 20
+set loadbatch 20000
 set visiblerefs {"master"}
 set maxlinelen 200
 set showlocalchanges 1
@@ -12790,6 +12905,7 @@ set config_variables {
     linehoverfgcolor
     linehoveroutlinecolor
     linkfgcolor
+    loadbatch
     mainfont
     mainheadcirclecolor
     markbgcolor
