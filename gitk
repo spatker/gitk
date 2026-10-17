@@ -2909,6 +2909,7 @@ proc makewindow {} {
         {mc "Diff this -> selected" command {diffvssel 0}}
         {mc "Diff selected -> this" command {diffvssel 1}}
         {mc "Make patch" command mkpatch}
+        {mc "Format patches..." command formatpatches}
         {mc "Create tag" command mktag}
         {mc "Copy commit reference" command copyreference}
         {mc "Write commit to file" command writecommit}
@@ -9551,13 +9552,13 @@ proc rowmenu {x y id} {
     if {$id ne $nullid && $id ne $nullid2} {
         set menu $rowctxmenu
         if {$mainhead ne {}} {
-            $menu entryconfigure 8 -label [mc "Reset %s branch to here" $mainhead] -state normal
+            $menu entryconfigure 9 -label [mc "Reset %s branch to here" $mainhead] -state normal
         } else {
-            $menu entryconfigure 8 -label [mc "Detached head: can't reset" $mainhead] -state disabled
+            $menu entryconfigure 9 -label [mc "Detached head: can't reset" $mainhead] -state disabled
         }
-        $menu entryconfigure 10 -state $mstate
         $menu entryconfigure 11 -state $mstate
         $menu entryconfigure 12 -state $mstate
+        $menu entryconfigure 13 -state $mstate
     } else {
         set menu $fakerowmenu
     }
@@ -9899,6 +9900,117 @@ proc mkpatchcan {} {
 
     catch {destroy $patchtop}
     unset patchtop
+}
+
+# Write the commits from the selected one to the one the menu is for
+# (or just that one) as patch files with "git format-patch".
+proc formatpatches {} {
+    global rowmenuid currentid commitinfo fptop fpdir fpstart
+    global formatpatchopts formatpatchsrcuri
+
+    set ids [list $rowmenuid]
+    if {[info exists currentid] && $currentid ne $rowmenuid} {
+        if {![catch {safe_exec [list git merge-base --is-ancestor $currentid $rowmenuid]}]} {
+            set ids [list $currentid $rowmenuid]
+        } elseif {![catch {safe_exec [list git merge-base --is-ancestor $rowmenuid $currentid]}]} {
+            set ids [list $rowmenuid $currentid]
+        } else {
+            error_popup [mc "The selected commit and this one aren't on the\
+                             same line of history."]
+            return
+        }
+    }
+    lassign $ids oldest newest
+    if {$newest eq {}} {
+        set newest $oldest
+    }
+    if {[catch {set base [exec git rev-parse --verify --quiet $oldest^]}]} {
+        set range [list --root $newest]
+        set n [exec git rev-list --count $newest]
+    } else {
+        set range [list $base..$newest]
+        set n [exec git rev-list --count $base..$newest]
+    }
+
+    set top .formatpatches
+    set fptop $top
+    catch {destroy $top}
+    ttk_toplevel $top
+    make_transient $top .
+    ttk::label $top.title -text [mc "Format patches"]
+    grid $top.title - - -pady 10
+    ttk::label $top.what -justify left -text \
+        [mc "%d commits, from:\n  %s\nto:\n  %s" $n \
+             [lindex $commitinfo($oldest) 0] [lindex $commitinfo($newest) 0]]
+    grid $top.what - - -sticky w -padx 5
+    ttk::label $top.dirl -text [mc "Output directory:"]
+    if {![info exists fpdir]} {
+        set fpdir [pwd]
+    }
+    ttk::entry $top.dir -width 50 -textvariable fpdir
+    ttk::button $top.dirb -text [mc "Browse..."] -command {
+        set d [tk_chooseDirectory -parent $fptop -initialdir $fpdir]
+        if {$d ne {}} {
+            set fpdir $d
+        }
+    }
+    grid $top.dirl $top.dir $top.dirb -sticky w -padx 5 -pady 2
+    ttk::label $top.startl -text [mc "Start number:"]
+    set fpstart 1
+    ttk::spinbox $top.start -from 1 -to 9999 -width 6 -textvariable fpstart
+    grid $top.startl $top.start -sticky w -padx 5 -pady 2
+    ttk::label $top.optsl -text [mc "Options:"]
+    ttk::entry $top.opts -width 50 -textvariable formatpatchopts
+    grid $top.optsl $top.opts - -sticky w -padx 5 -pady 2
+    ttk::checkbutton $top.srcuri -variable formatpatchsrcuri -text \
+        [mc "Copy the patches as \"file://...\" lines for a recipe"]
+    grid $top.srcuri - - -sticky w -padx 5 -pady 2
+    ttk::frame $top.buts
+    ttk::button $top.buts.gen -text [mc "Write"] -command [list formatpatchesgo $range]
+    ttk::button $top.buts.can -text [mc "Cancel"] -command {destroy $fptop}
+    bind $top <Key-Return> [list formatpatchesgo $range]
+    bind $top <Key-Escape> {destroy $fptop}
+    grid $top.buts.gen $top.buts.can
+    grid columnconfigure $top.buts 0 -weight 1 -uniform a
+    grid columnconfigure $top.buts 1 -weight 1 -uniform a
+    grid $top.buts - - -pady 10 -sticky ew
+    focus $top.dir
+}
+
+proc formatpatchesgo {range} {
+    global fptop fpdir fpstart formatpatchopts formatpatchsrcuri
+
+    if {[catch {set opts [shellsplit $formatpatchopts]} err]} {
+        error_popup $err $fptop
+        return
+    }
+    set cmd [concat [list git format-patch -o $fpdir --start-number $fpstart] \
+                 $opts $range]
+    if {[catch {set files [safe_exec $cmd]} err]} {
+        error_popup "[mc "Error writing patches:"] $err" $fptop
+        return
+    }
+    destroy $fptop
+    set files [split $files "\n"]
+    if {[llength $files] == 1} {
+        set msg [mc "Wrote 1 patch to %s." $fpdir]
+    } else {
+        set msg [mc "Wrote %d patches to %s." [llength $files] $fpdir]
+    }
+    if {$formatpatchsrcuri} {
+        set lines {}
+        foreach f $files {
+            lappend lines "file://[file tail $f] \\"
+        }
+        clipboard clear
+        clipboard append [join $lines "\n"]
+        append msg "\n\n" [mc "Copied to the clipboard:"] "\n" [join $lines "\n"]
+    }
+    set w .formatpatchesdone
+    ttk_toplevel $w
+    make_transient $w .
+    wm title $w [mc "Format patches"]
+    show_error $w $w $msg
 }
 
 proc mktag {} {
@@ -13260,6 +13372,8 @@ set hideremotes 0
 set refstohide ""
 set sortrefsbytype 1
 set maxrefs 20
+set formatpatchopts "-N"
+set formatpatchsrcuri 1
 set loadbatch 20000
 set visiblerefs {"master"}
 set maxlinelen 200
@@ -13385,6 +13499,8 @@ set config_variables {
     filesepbgcolor
     filesepfgcolor
     findmergefiles
+    formatpatchopts
+    formatpatchsrcuri
     foundbgcolor
     headbgcolor
     headfgcolor
