@@ -2945,7 +2945,8 @@ proc makewindow {} {
         {xx "" separator}
         {mc "Fixup marked commit into this" command {foldmarked fixup}}
         {mc "Squash marked commit into this" command {foldmarked squash}}
-        {mc "Fixup local changes into this" command foldlocal}
+        {mc "Fixup local changes into this" command {foldlocal 1}}
+        {mc "Create fixup commit for this" command {foldlocal 0}}
         {mc "Move marked commit on top of this" command {movemarked 1}}
         {mc "Move marked commit below this" command {movemarked 0}}
         {xx "" separator}
@@ -10814,28 +10815,40 @@ proc foldmarked {how} {
     rewritehistory [list $into $from] [list foldtodo $how $from $into] $into
 }
 
-# Fold the staged changes (or if nothing is staged, all changes to
-# tracked files) into the commit the menu is for.
-proc foldlocal {} {
+# Commit the staged changes (or if nothing is staged, all changes to
+# tracked files) as a "fixup!" commit for the commit the menu is for,
+# and if $fold is set, fold it into that commit right away.
+proc foldlocal {fold} {
     global rowmenuid commitinfo
 
     set into $rowmenuid
-    if {[rewritablerange [list $into]] eq {}} return
+    if {$fold && [rewritablerange [list $into]] eq {}} return
     set cmd [list git commit --quiet --fixup=$into]
     if {![catch {safe_exec [list git diff --cached --quiet]}]} {
         # nothing staged
         if {![catch {safe_exec [list git diff --quiet]}]} {
-            error_popup [mc "There are no local changes to fold in."]
+            error_popup [mc "There are no local changes to commit."]
             return
         }
-        if {![confirm_popup [mc "Nothing is staged.  Fold all local changes\
-                to tracked files into \"%s\"?" [lindex $commitinfo($into) 0]]]} {
+        if {$fold} {
+            set msg [mc "Nothing is staged.  Fold all local changes\
+                to tracked files into \"%s\"?" [lindex $commitinfo($into) 0]]
+        } else {
+            set msg [mc "Nothing is staged.  Commit all local changes\
+                to tracked files as a fixup for \"%s\"?" \
+                         [lindex $commitinfo($into) 0]]
+        }
+        if {![confirm_popup $msg]} {
             return
         }
         lappend cmd --all
     }
     if {[catch {safe_exec_redirect $cmd [list 2>@1]} err]} {
         error_popup $err
+        return
+    }
+    if {!$fold} {
+        updatecommits
         return
     }
     set fixup [exec git rev-parse HEAD]
